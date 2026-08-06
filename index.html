@@ -41,6 +41,7 @@ header{
 .brand{font-family:var(--disp);font-size:19px;letter-spacing:.22em;text-transform:uppercase;font-weight:700;color:var(--amber)}
 .brand small{display:block;font-size:9px;letter-spacing:.3em;color:var(--dim);font-weight:400}
 header .spacer{flex:1}
+#status.linked{border-bottom-color:#3b6ea5}
 .iconbtn{
   background:none;border:1px solid var(--line);color:var(--dim);
   font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
@@ -145,8 +146,9 @@ kbd{background:#2a3222;border:1px solid var(--line);padding:1px 5px;border-radiu
 </noscript>
 <div id="app">
   <header>
-    <div class="brand">Everon<small>Conflict &middot; build 12</small></div>
+    <div class="brand">Everon<small>Conflict &middot; build 13</small></div>
     <div class="spacer"></div>
+    <button class="iconbtn" id="btnLink">Link</button>
     <button class="iconbtn" id="btnMap">Map</button>
     <button class="iconbtn" id="btnEdit">Edit</button>
     <button class="iconbtn" id="btnRules">Rules</button>
@@ -181,7 +183,7 @@ window.onerror = function(msg, src, line){
     + '<p>The game hit an error and stopped.</p>'
     + '<p style="color:#8d9480">' + msg + ' — line ' + line + '</p>'
     + '<p style="color:#8d9480">If the file came through a chat app it may have been altered in transit; '
-    + 'it should be about 508 KB. Otherwise try Safari, Chrome or Firefox rather than a file preview.</p></div>';
+    + 'it should be about 510 KB. Otherwise try Safari, Chrome or Firefox rather than a file preview.</p></div>';
   return true;
 };
 var svgPoint = ()=>({x:0,y:0});
@@ -464,7 +466,7 @@ const DEALS = {
   scattered: {name:"Scattered",   note:"Interleaved across the whole island. No front line, nobody rushable, seat order barely matters."},
   clusters:  {name:"Clusters",    note:"Three pockets each, grown outward. Local fights everywhere, but no free region."},
   home:      {name:"Home region", note:"One whole region each, as far apart as the map allows, plus a scattered share."},
-  mob:       {name:"MOBs",        note:"Two players only. One side deploys from Airbase Saint-Philippe in the far north, the other from the naval base at Saint-Pierre in the south-east, and each grows outward from there."}
+  mob:       {name:"MOBs",        note:"Two players only. One side deploys from Airbase Saint-Philippe in the far north, the other from the naval base at Saint-Pierre in the south-east, and each grows outward from there. Which end you get is tossed for."}
 };
 
 // Seeds placed as far from one another as the board allows.
@@ -493,7 +495,8 @@ function dealTerritories(n, style, cap){
   } else if(style==="clusters"){
     spreadSeeds(n*3).forEach((id,i)=>{ owner[id]=i%n; count[i%n]++; });
   } else if(style==="mob"){
-    const seeds = (TT.airbase && TT.stpierre) ? ["airbase","stpierre"] : spreadSeeds(n);
+    let seeds = (TT.airbase && TT.stpierre) ? ["airbase","stpierre"] : spreadSeeds(n);
+    if(seeds.length>1 && rnd(2)) seeds = seeds.slice().reverse();   // toss for the ends
     seeds.slice(0,n).forEach((id,i)=>{ owner[id]=i; count[i]++; });
   }
 
@@ -540,7 +543,8 @@ function newGame(seatCfg, style, fia){
                          color:"#5c7b2f", ai:false, alive:true, neutral:true}] : []),
     terr:{}, cur:0, phase:"deploy", pool:0, sel:null,
     subs:seatCfg.map(()=>null), subMoved:false, engage:null, breach:null,
-    turns:seatCfg.map(()=>0),
+    turns:seatCfg.map(()=>0), airliftLast:{}, events:[],
+    stats:{},
     naval:false, navalUsed:false, airlift:false, airliftUsed:false, fortifyUsed:false,
     log:[], over:false, busy:false, conquered:false
   };
@@ -562,9 +566,14 @@ function newGame(seatCfg, style, fia){
     }
     while(have < starting){ S.terr[mine[rnd(mine.length)]].troops++; have++; }
   });
+  S.players.forEach(p=>{ S.stats[p.i] = {captured:0, lost:0, killed:0, died:0, reinforced:0,
+    airlifts:0, airliftTroops:0, subsBuilt:0, subsLost:0, navalRuns:0, navalWins:0,
+    peak:0, peakTurn:0, history:[]}; });
   log("Cold War, 1989. One island, and nobody willing to leave it.", true);
   log(`Opening: ${DEALS[S.deal].name.toLowerCase()}.`);
   if(useFia) log(`The FIA holds ${neutral} positions across the middle of the island.`, true);
+  if(S.deal==="mob" && TT.airbase && TT.stpierre && S.players[owner.airbase] && S.players[owner.stpierre])
+    log(`Toss: ${S.players[owner.airbase].short} deploys from Airbase Saint-Philippe, ${S.players[owner.stpierre].short} from Saint-Pierre.`, true);
   homes.forEach((k,i)=>log(`${S.players[i].short} holds the ${REGIONS[k].name}.`));
   beginTurn();
 }
@@ -619,6 +628,13 @@ function beginTurn(){
   if(held.length>=5){ return endGame(p, "operational control of five regions"); }
   const r = reinforcements(p.i);
   S.pool = r.total;
+  const st = S.stats[p.i];
+  if(st){
+    const held = owned(p.i).length;
+    st.reinforced += r.total;
+    st.history.push(held);
+    if(held > st.peak){ st.peak = held; st.peakTurn = S.turns[p.i]; }
+  }
   const parts=[`${r.troops} from ground`];
   if(r.bonus) parts.push(`${r.bonus} from ${held.length} region${held.length>1?"s":""}`);
   if(r.inst) parts.push(`${r.inst} from installations`);
@@ -674,6 +690,7 @@ function beginIntercept(from, to){
   const owner = S.terr[to].owner;
   S.engage = {from, to, owner, hull:SUB_HULL, round:0};
   S.navalUsed = true; S.naval = false;
+  if(S.stats[S.players[S.cur].i]) S.stats[S.players[S.cur].i].navalRuns++;
   log(`${S.players[owner].short} submarine intercepts the crossing to ${TT[to].name}.`, true);
   render();
 }
@@ -693,6 +710,8 @@ function interceptRound(){
   log(`Pass ${e.round} <span class="dice">[${a.join(" ")}] v [${d.join(" ")}]</span> — convoy ${aL}, submarine ${dL}`);
   if(e.hull <= 0){
     S.subs[e.owner] = null;
+    if(S.stats[S.players[S.cur].i]) S.stats[S.players[S.cur].i].navalWins++;
+    if(S.stats[e.owner]) S.stats[e.owner].subsLost++;
     log(`${S.players[e.owner].short} submarine sunk. The way to ${TT[e.to].name} is open.`, true);
     S.breach = {from:e.from, to:e.to};
     S.sel = e.from; S.pendingTarget = e.to; S.engage = null;
@@ -707,6 +726,7 @@ function convoyTurnsBack(cost){
   const e = S.engage, A = S.terr[e.from];
   const paid = Math.max(0, Math.min(cost, A.troops-1));
   A.troops -= paid;
+  if(S.stats[S.players[S.cur].i]) S.stats[S.players[S.cur].i].died += paid;
   log(paid ? `Convoy breaks off for ${TT[e.to].name}, ${paid} lost covering the withdrawal.`
            : `Convoy is driven off from ${TT[e.to].name}. The submarine holds the approach.`, true);
   S.engage = null; S.sel = e.from; S.pendingTarget = null;
@@ -719,6 +739,8 @@ function doAttack(from, to, blitz){
   do{
     if(S.terr[from].troops<2 || S.terr[to].troops<1) break;
     const res=battle(from,to); last=res; rounds++;
+    if(S.stats[pid]){ S.stats[pid].died += res.aL; S.stats[pid].killed += res.dL; }
+    if(S.stats[S.terr[to].owner]) S.stats[S.terr[to].owner].died += res.dL;
     if(rounds<=1 || !blitz){
       log(`${TT[from].name} → ${TT[to].name} <span class="dice">[${res.a.join(" ")}] v [${res.d.join(" ")}]</span>${res.hi?" (highland +1)":""} — lost ${res.aL}/${res.dL}`);
     }
@@ -729,6 +751,10 @@ function doAttack(from, to, blitz){
       log(`${TT[to].name} taken. ${move} moved in.`, true);
       if(S.subs[prev]===to){ S.subs[prev]=null; log(`${S.players[prev].short} submarine lost with its home port.`, true); }
       taken=true; S.conquered=true;
+      if(S.stats[pid]) S.stats[pid].captured++;
+      if(S.stats[prev]) S.stats[prev].lost++;
+      if(TT[to].mob || TT[to].income>=2)
+        S.events.push({turn:S.turns[pid], by:pid, from:prev, text:`${TT[to].name} fell`});
       if(owned(prev).length===0){ S.players[prev].alive=false;
         log(S.players[prev].neutral ? "The FIA is driven from the island." : `${S.players[prev].name} eliminated.`, true); }
       break;
@@ -775,9 +801,16 @@ function connected(from){ // owned territories reachable through owned ground
     ADJ[c].forEach(n=>{ if(!seen.has(n) && S.terr[n].owner===pid){ seen.add(n); q.push(n);} }); }
   seen.delete(from); return [...seen];
 }
+function airliftReady(pid){
+  if(!T.some(t=>t.airbase && S.terr[t.id].owner===pid)) return false;
+  const last = S.airliftLast[pid];
+  return last === undefined || S.turns[pid] >= last + 2;
+}
+function keepBehind(){ return S.airlift ? 2 : 1; }
+
 function moveTargets(from){
   const pid=S.players[S.cur].i;
-  if(S.terr[from].owner!==pid || S.terr[from].troops<2) return [];
+  if(S.terr[from].owner!==pid || S.terr[from].troops <= keepBehind()) return [];
   if(S.airlift) return owned(pid).filter(id=>id!==from);
   return connected(from);
 }
@@ -796,6 +829,10 @@ let view = {x:0,y:0,w:720,h:720};
 let baseDrawn=false;
 
 function render(){
+  paint();
+  if(NET.on && NET.conn && !NET.applying) netSend();
+}
+function paint(){
   if(!S) return;
   if(ED.on){ renderEdStatus(); renderMap(); renderEdConsole(); renderLog(); return; }
   $("status").classList.remove("editing");
@@ -879,6 +916,11 @@ function renderConsole(){
     D.textContent="";
     return;
   }
+  if(NET.on && S.cur !== NET.seat){
+    $("prompt").innerHTML=`<b>${p.short}</b> is taking their turn.`;
+    D.textContent="You'll see their moves as they make them.";
+    return;
+  }
 
   const selT = S.sel ? TT[S.sel] : null;
   if(selT){
@@ -901,7 +943,7 @@ function renderConsole(){
     const cost = subCost(p.i);
     A.append(btn(`Commission sub (${cost})`, {
       dis:!(S.sel && S.terr[S.sel].owner===p.i && TT[S.sel].port && S.pool>=cost && !subOf(p.i)),
-      fn:()=>{ S.pool-=cost; S.subs[p.i]=S.sel;
+      fn:()=>{ S.pool-=cost; S.subs[p.i]=S.sel; if(S.stats[p.i]) S.stats[p.i].subsBuilt++;
                log(`${p.short} submarine commissioned at ${TT[S.sel].name}.`, true);
                if(S.pool===0){S.phase="attack"; S.sel=null;} render(); }}));
     A.append(btn("To attack", {cls:"primary", dis:S.pool>0, fn:()=>{S.phase="attack"; S.sel=null; render();}}));
@@ -943,9 +985,10 @@ function renderConsole(){
           : `<b>Fortify</b> — tap a position with 2+ troops to move from.`);
     const canMove = S.sel && S.pendingTarget && !S.fortifyUsed && moveTargets(S.sel).includes(S.pendingTarget);
     A.append(btn("Move 1", {dis:!canMove, fn:()=>fortify(1)}));
-    A.append(btn("Move all", {dis:!canMove, fn:()=>fortify(S.terr[S.sel].troops-1)}));
-    A.append(btn(S.airlift?"Airlift: armed":"Airlift", {on:S.airlift,
-      dis:!T.some(t=>t.airbase && S.terr[t.id].owner===p.i) || S.airliftUsed || S.fortifyUsed,
+    A.append(btn("Move all", {dis:!canMove, fn:()=>fortify(S.terr[S.sel].troops-keepBehind())}));
+    const liftOk = airliftReady(p.i);
+    A.append(btn(S.airlift?"Airlift: armed":(liftOk?"Airlift":"Airlift (turnaround)"), {on:S.airlift,
+      dis:!liftOk || S.airliftUsed || S.fortifyUsed,
       fn:()=>{S.airlift=!S.airlift; render();}}));
     A.append(btn("Station sub", {
       dis:!(subOf(p.i) && !S.subMoved && S.sel && S.terr[S.sel].owner===p.i && TT[S.sel].port && S.sel!==S.subs[p.i]),
@@ -957,10 +1000,15 @@ function renderConsole(){
 }
 
 function fortify(n){
-  n=Math.max(1, Math.min(n, S.terr[S.sel].troops-1));
+  const pid = S.players[S.cur].i, keep = keepBehind();
+  n=Math.max(1, Math.min(n, S.terr[S.sel].troops-keep));
   S.terr[S.sel].troops-=n; S.terr[S.pendingTarget].troops+=n;
   log(`${n} moved ${TT[S.sel].name} → ${TT[S.pendingTarget].name}${S.airlift?" by air":""}.`);
-  if(S.airlift){ S.airliftUsed=true; S.airlift=false; } else { S.fortifyUsed=true; }
+  if(S.airlift){
+    S.airliftUsed=true; S.airliftLast[pid]=S.turns[pid]; S.airlift=false;
+    if(S.stats[pid]){ S.stats[pid].airlifts++; S.stats[pid].airliftTroops+=n; }
+    log("The airfield needs a turn to turn the aircraft round.");
+  } else { S.fortifyUsed=true; }
   S.sel=null; S.pendingTarget=null; render();
 }
 
@@ -974,6 +1022,7 @@ function renderLog(){
 function onNodeTap(id){
   if(ED.on) return edNodeTap(id);
   if(!S || S.over || S.busy || S.players[S.cur].ai) return;
+  if(NET.on && S.cur !== NET.seat) return;
   const pid=S.players[S.cur].i;
   if(S.phase==="deploy"){
     if(S.terr[id].owner===pid){
@@ -1054,7 +1103,7 @@ async function aiTurn(){
     const byRegion={};
     myPorts.forEach(id=>{ byRegion[TT[id].r]=(byRegion[TT[id].r]||[]).concat(id); });
     const best=Object.values(byRegion).sort((a,b)=>b.length-a.length)[0];
-    S.pool-=subCost(pid); S.subs[pid]=best[0];
+    S.pool-=subCost(pid); S.subs[pid]=best[0]; if(S.stats[pid]) S.stats[pid].subsBuilt++;
     log(`${S.players[pid].short} submarine commissioned at ${TT[best[0]].name}.`, true);
   }
 
@@ -1184,7 +1233,7 @@ function showRules(){
     </ul>
     <h2>A turn</h2>
     <p><span class="tag">The opening.</span> Choose how the island is carved up before you start. <span class="tag">Scattered</span> interleaves everyone, so there is no front and nothing rushable. <span class="tag">Clusters</span> gives each side three pockets grown outward. <span class="tag">Home region</span> hands each side one whole region, as far apart as the map allows. <span class="tag">MOBs</span>, for two players, is the default.</p>
-<p>The two-player default is a <span class="tag">MOB</span> start, the way Conflict opens. One side deploys from Airbase Saint-Philippe at the northern tip, the other from the naval base at Saint-Pierre in the south-east, and each grows outward from its main operating base.</p>
+<p>The two-player default is a <span class="tag">MOB</span> start, the way Conflict opens. One side deploys from Airbase Saint-Philippe at the northern tip, the other from the naval base at Saint-Pierre in the south-east, and each grows outward from its main operating base. Which end you get is <em>tossed for</em> — the two MOBs pay the same but play differently, so it is worth reading the log to see which you drew.</p>
 <p>In a two-player game the <span class="tag">Everon Freedom Alliance</span> can hold the middle. You each take twelve positions at opposite ends of the island and the resistance garrisons the thirteen between you. The FIA never takes a turn and never attacks, but its ground is held and has to be cleared — so there is somewhere to grow that is not your opponent's face.</p>
 <p>Every position starts garrisoned rather than empty — ordinary ground holds 1 to 3, installations 2 to 4 — and the rest of your army is scattered over what you hold. Two players field 60 troops each head to head, or 42 each with the FIA holding the middle. Three players field 40, four field 30.</p>
 <p>On your <em>first</em> turn you draw ground income only — territories ÷ 3, minimum 3. Regions and installations start paying from your second turn. Ground you were handed has to be held before it funds you.</p>
@@ -1194,7 +1243,7 @@ function showRules(){
     <h2>Installations</h2>
     <p>Ten military sites each pay reinforcements while you hold them. They sit apart from the region bonuses, so a player locked out of a whole region can still fund a war by taking bases.</p>
     <ul>
-      <li><span class="tag">✈ Airbase Saint-Philippe</span> +2 — the island's only paved runway. Also grants one <em>airlift</em> per turn: move troops between any two territories you hold, connected or not.</li>
+      <li><span class="tag">✈ Airbase Saint-Philippe</span> +2 — the island's only paved runway. It can mount an <em>airlift</em> every other turn: move troops between any two territories you hold, connected or not. Whatever they fly out of must keep <span class="tag">2</span> behind, and the airfield then needs a turn to turn the aircraft round.</li>
       <li><span class="tag">⚑ Saint-Pierre Naval Base</span> +2 — the southern main operating base. Submarines commissioned while you hold it cost <span class="tag">4</span> instead of 8.</li>
       <li><span class="tag">▣ Military Depot</span> +1 &nbsp; <span class="tag">▣ Quarry</span> +1</li>
       <li><span class="tag">⚡ Power Plant</span> +1 &nbsp; <span class="tag">✚ Military Hospital</span> +1</li>
@@ -1229,12 +1278,138 @@ function showRules(){
   o.querySelector("#closeRules").onclick=()=>o.remove();
 }
 
-function showEnd(p,how){
-  const o=overlay(`
-    <h1>${p.short} holds Everon</h1>
-    <p style="font-size:13px;color:#cfd4c2">${p.name} wins by ${how}.</p>
-    <div style="margin-top:16px;display:flex;gap:8px">
-      <button class="act" id="endStay" style="flex:1">Review map</button>
+function viewerSeat(){
+  if(NET.on) return NET.seat;
+  const human = S.players.filter(p=>!p.neutral && !p.ai)[0];
+  return human ? human.i : 0;
+}
+
+// Two lines, positions held at the start of each of your turns. The shape of the
+// war is usually more legible than any single number.
+function warGraph(){
+  const sides = S.players.filter(p=>!p.neutral && S.stats[p.i]);
+  const len = Math.max.apply(null, sides.map(p=>S.stats[p.i].history.length).concat([2]));
+  const top = Math.max.apply(null, sides.reduce((a,p)=>a.concat(S.stats[p.i].history),[1]));
+  const W=440, H=140, PX=26, PY=12;
+  const px=i=>PX + (i/Math.max(1,len-1))*(W-PX-8);
+  const py=v=>H-PY-18 - (v/top)*(H-PY*2-18);
+  let g = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">`;
+  [0, Math.round(top/2), top].forEach(v=>{
+    g += `<line x1="${PX}" y1="${py(v)}" x2="${W-8}" y2="${py(v)}" stroke="#2c3426" stroke-width="1"/>`
+       + `<text x="${PX-5}" y="${py(v)+3}" text-anchor="end" font-size="8" fill="#6f7663" font-family="monospace">${v}</text>`;
+  });
+  sides.forEach(p=>{
+    const h=S.stats[p.i].history;
+    if(h.length<1) return;
+    g += `<polyline fill="none" stroke="${p.color}" stroke-width="2.2" stroke-linejoin="round"
+          points="${h.map((v,i)=>px(i)+','+py(v)).join(' ')}"/>`;
+    g += `<circle cx="${px(h.length-1)}" cy="${py(h[h.length-1])}" r="3" fill="${p.color}"/>`;
+  });
+  for(let i=0;i<len;i+=Math.max(1,Math.ceil(len/6)))
+    g += `<text x="${px(i)}" y="${H-4}" text-anchor="middle" font-size="8" fill="#6f7663" font-family="monospace">${i+1}</text>`;
+  g += `<text x="${W-8}" y="${H-4}" text-anchor="end" font-size="8" fill="#6f7663" font-family="monospace">turn</text>`;
+  return g + `</svg>`;
+}
+
+// Read the campaign back and say something true about it.
+function afterAction(me, foe){
+  const a=S.stats[me.i], b=S.stats[foe.i], lines=[];
+  const h=a.history, oh=b.history;
+
+  // when did the lead change hands for the last time?
+  let flip=-1;
+  for(let i=1;i<Math.min(h.length,oh.length);i++)
+    if((h[i-1]>=oh[i-1]) !== (h[i]>=oh[i])) flip=i;
+  if(flip>0) lines.push(`The lead changed hands for the last time on turn ${flip+1}.`);
+
+  if(a.peak > (h[h.length-1]||0) + 2)
+    lines.push(`You peaked at ${a.peak} positions on turn ${a.peakTurn} and finished with ${h[h.length-1]||0}.`);
+
+  // longest unbroken slide
+  let run=0, best=0, at=0;
+  for(let i=1;i<h.length;i++){ if(h[i]<h[i-1]){ run++; if(run>best){best=run; at=i+1;} } else run=0; }
+  if(best>=3) lines.push(`You lost ground ${best} turns running, ending turn ${at}.`);
+
+  const majors = S.events.filter(e=>e.from===me.i);
+  if(majors.length) lines.push(`${majors[0].text} on turn ${majors[0].turn}.`);
+
+  if(a.died > a.killed*1.4)
+    lines.push(`You spent ${a.died} troops to kill ${a.killed}. Too many attacks at bad odds.`);
+  if(a.captured && a.died/Math.max(1,a.captured) > 12)
+    lines.push(`Every position you took cost about ${Math.round(a.died/a.captured)} troops.`);
+
+  const heldAir = T.some(t=>t.airbase && S.terr[t.id].owner===me.i);
+  if(heldAir && !a.airlifts) lines.push(`You ended holding the airfield and never flew a lift.`);
+  if(!a.subsBuilt && T.some(t=>t.port && S.terr[t.id].owner===me.i))
+    lines.push(`You held ports all game and never put a boat to sea.`);
+  if(a.navalRuns && !a.navalWins) lines.push(`${a.navalRuns} blockade${a.navalRuns>1?"s":""} run, none broken.`);
+  if(!a.navalRuns && !a.airlifts && !a.subsBuilt)
+    lines.push(`You fought this one entirely on foot. The airfield, the boats and the water were all available.`);
+  return lines.slice(0,4);
+}
+
+function statTable(me, foe){
+  const a=S.stats[me.i], b=S.stats[foe.i];
+  const row=(label,x,y)=>`<tr>
+    <td style="padding:4px 8px 4px 0;color:#8d9480">${label}</td>
+    <td style="padding:4px 10px;text-align:right;font-weight:700;color:${me.color}">${x}</td>
+    <td style="padding:4px 0;text-align:right;color:${foe.color}">${y}</td></tr>`;
+  return `<table style="width:100%;font-size:12px;border-collapse:collapse">
+    <tr><td></td>
+      <td style="text-align:right;font-size:9px;letter-spacing:.16em;color:#8d9480;padding-bottom:4px">${me.short}</td>
+      <td style="text-align:right;font-size:9px;letter-spacing:.16em;color:#8d9480;padding-bottom:4px">${foe.short}</td></tr>
+    ${row("Positions held", owned(me.i).length, owned(foe.i).length)}
+    ${row("High-water mark", a.peak+" (turn "+a.peakTurn+")", b.peak+" (turn "+b.peakTurn+")")}
+    ${row("Positions taken", a.captured, b.captured)}
+    ${row("Positions lost", a.lost, b.lost)}
+    ${row("Troops committed", a.reinforced, b.reinforced)}
+    ${row("Troops lost", a.died, b.died)}
+    ${row("Enemy killed", a.killed, b.killed)}
+    ${row("Airlifts flown", a.airlifts + (a.airliftTroops?" ("+a.airliftTroops+")":""), b.airlifts + (b.airliftTroops?" ("+b.airliftTroops+")":""))}
+    ${row("Boats commissioned", a.subsBuilt, b.subsBuilt)}
+    ${row("Boats lost", a.subsLost, b.subsLost)}
+    ${row("Blockades run / broken", a.navalRuns+" / "+a.navalWins, b.navalRuns+" / "+b.navalWins)}
+  </table>`;
+}
+
+function showEnd(winner, how){
+  const seat = viewerSeat();
+  const me = S.players[seat];
+  const foe = S.players.filter(p=>!p.neutral && p.i!==seat)[0] || winner;
+  const won = winner.i === seat;
+  const turn = S.turns[winner.i];
+  const regions = regionsHeld(winner.i).length;
+
+  const headline = won
+    ? (how.indexOf("total") === 0 ? "EVERON IS YOURS" : "THE ISLAND IS HELD")
+    : "THE ISLAND IS LOST";
+  const sub = won
+    ? `${winner.name} — ${how}, turn ${turn}.`
+    : `${winner.name} took the island by ${how} on turn ${turn}.`;
+
+  const flavour = won
+    ? `<p>The guns stop. ${regions === Object.keys(REGIONS).length
+        ? "There is nothing left on Everon flying anyone else's flag."
+        : "What is left of them is not coming back."} Somebody in a capital a long way from here will call this a success and move on to the next map.</p>`
+    : `<p>The last of your positions goes quiet. What is left of your force is on the beach or in the hills, and the radio is answering to somebody else's callsign. The island keeps going without you.</p>`;
+
+  const notes = afterAction(me, foe);
+
+  const o = overlay(`
+    <h1 style="color:${won ? "var(--amber)" : "#e2887f"}">${headline}</h1>
+    <p style="font-size:13px;color:#cfd4c2">${sub}</p>
+    ${flavour}
+    <h2>The campaign</h2>
+    ${warGraph()}
+    <p style="font-size:11px;color:#8d9480;margin-top:2px">Positions held at the start of each turn.
+      <span style="color:${me.color}">■</span> you &nbsp; <span style="color:${foe.color}">■</span> ${foe.short}</p>
+    <h2>After action</h2>
+    ${notes.length ? "<ul>"+notes.map(n=>`<li>${n}</li>`).join("")+"</ul>"
+                   : "<p>Nothing about this one was wasted.</p>"}
+    <h2>Record</h2>
+    ${statTable(me, foe)}
+    <div style="margin-top:18px;display:flex;gap:8px">
+      <button class="act" id="endStay" style="flex:1">Review the map</button>
       <button class="act primary" id="endNew" style="flex:1">New campaign</button>
     </div>`);
   o.querySelector("#endStay").onclick=()=>o.remove();
@@ -1562,7 +1737,181 @@ function edFiles(){
   o.querySelector("#mDone").onclick=()=>o.remove();
 }
 
-$("btnEdit").onclick=()=>{ ED.on ? exitEditor() : enterEditor(); };
+$("btnEdit").onclick=()=>{
+  if(NET.on){ NET.note="Disconnect before editing the map — changes would desync the other side."; return showNet(); }
+  ED.on ? exitEditor() : enterEditor();
+};
+
+
+/* ============================================================
+   Peer-to-peer link. WebRTC via PeerJS, fetched only when you
+   open the panel — single player stays entirely offline.
+   The game is perfect information, so there is nothing to hide
+   and no referee needed: whoever's turn it is sends the whole
+   board after every action and the other side simply mirrors it.
+   ============================================================ */
+const NET = {on:false, seat:0, peer:null, conn:null, applying:false,
+             code:null, host:false, note:""};
+
+function netCode(){
+  const A="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";   // no I/O/0/1
+  let c=""; for(let i=0;i<4;i++) c+=A[rnd(A.length)];
+  return c;
+}
+const NET_PREFIX = "everon-conflict-v13-";
+
+function loadPeer(cb){
+  if(window.Peer) return cb(null);
+  const sc=document.createElement("script");
+  sc.src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js";
+  sc.onload=function(){ cb(window.Peer ? null : new Error("library did not load")); };
+  sc.onerror=function(){ cb(new Error("could not reach the networking library")); };
+  document.head.appendChild(sc);
+}
+
+function netSend(){
+  try { NET.conn.send({t:"s", S:S}); } catch(e){ /* link dropped; status shows it */ }
+}
+
+function netApply(msg){
+  if(!msg || !msg.S) return;
+  NET.applying = true;
+  try {
+    if(msg.t==="init" && msg.map){
+      REGIONS = msg.map.REGIONS; T = msg.map.T; RAW_ADJ = msg.map.RAW_ADJ;
+      rebuild();
+    }
+    S = msg.S;
+    paint();
+  } finally { NET.applying = false; }
+}
+
+function netTeardown(note){
+  NET.on=false; NET.conn=null;
+  if(NET.peer){ try{ NET.peer.destroy(); }catch(e){} NET.peer=null; }
+  NET.note = note || "Link closed.";
+  $("status").classList.remove("linked");
+  paint();
+}
+
+function netWire(conn, onReady){
+  NET.conn = conn;
+  conn.on("data", netApply);
+  conn.on("close", function(){ netTeardown("Your opponent disconnected."); showNet(); });
+  conn.on("error", function(){ netTeardown("The link failed."); showNet(); });
+  conn.on("open", onReady);
+}
+
+function netHost(refresh){
+  loadPeer(function(err){
+    if(err){ NET.note = "Couldn't load the networking library — check your connection."; return refresh(); }
+    const code = netCode();
+    const peer = new Peer(NET_PREFIX+code, {debug:0});
+    NET.peer = peer; NET.host = true; NET.seat = 0;
+    peer.on("open", function(){
+      NET.code = code;
+      NET.note = "Waiting for your opponent to join…";
+      refresh();
+    });
+    peer.on("connection", function(conn){
+      netWire(conn, function(){
+        NET.on = true;
+        newGame([{f:0,ai:false},{f:1,ai:false}], "mob", true);
+        NET.applying = true;
+        try { conn.send({t:"init", map:{REGIONS:REGIONS, T:T, RAW_ADJ:RAW_ADJ}, S:S}); }
+        finally { NET.applying = false; }
+        NET.note = "Connected. You are the USA and you move first.";
+        $("status").classList.add("linked");
+        refresh(); paint();
+      });
+    });
+    peer.on("error", function(e){
+      if(e.type==="unavailable-id"){ try{peer.destroy();}catch(x){} return netHost(refresh); }
+      NET.note = "Connection problem ("+e.type+")."; refresh();
+    });
+  });
+}
+
+function netJoin(code, refresh){
+  code = (code||"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+  if(code.length!==4){ NET.note="A room code is four characters."; return refresh(); }
+  loadPeer(function(err){
+    if(err){ NET.note = "Couldn't load the networking library — check your connection."; return refresh(); }
+    const peer = new Peer(null, {debug:0});
+    NET.peer = peer; NET.host = false; NET.seat = 1;
+    NET.note = "Looking for that game…"; refresh();
+    peer.on("open", function(){
+      netWire(peer.connect(NET_PREFIX+code, {reliable:true}), function(){
+        NET.on = true; NET.code = code;
+        NET.note = "Connected. You are the Soviet Army and move second.";
+        $("status").classList.add("linked");
+        refresh();
+      });
+    });
+    peer.on("error", function(e){
+      NET.note = e.type==="peer-unavailable"
+        ? "No game is waiting on that code. Check it, or ask them to host again."
+        : "Connection problem ("+e.type+").";
+      refresh();
+    });
+  });
+}
+
+function showNet(){
+  const o = overlay("");
+  let joining = false, typed = "";
+  const draw = function(){
+    o.querySelector(".sheet").innerHTML = `
+      <h1>Play someone</h1>
+      ${NET.on ? `
+        <p style="color:#8fbf6a">Connected — you are ${S.players[NET.seat].name}.</p>
+        <p style="color:#8d9480">Room code <span class="tag">${NET.code}</span>. Moves appear on both screens as they happen. Only the side whose turn it is can act.</p>
+        <div style="margin-top:16px;display:flex;gap:8px">
+          <button class="act danger" id="nLeave" style="flex:1">Disconnect</button>
+          <button class="act primary" id="nDone" style="flex:1">Back to the game</button>
+        </div>`
+      : NET.code && NET.host ? `
+        <p style="color:#8d9480">Send this code to your opponent. Keep this tab open.</p>
+        <div style="font-family:var(--disp);font-size:52px;letter-spacing:.28em;color:var(--amber);
+                    text-align:center;padding:14px 0 6px">${NET.code}</div>
+        <p style="color:#8d9480;text-align:center">${NET.note}</p>
+        <div style="margin-top:16px;display:flex;gap:8px">
+          <button class="act danger" id="nLeave" style="flex:1">Cancel</button>
+          <button class="act" id="nDone" style="flex:1">Hide</button>
+        </div>`
+      : joining ? `
+        <p style="color:#8d9480">Type the four-character code your opponent gave you.</p>
+        <input class="fld" id="nCode" maxlength="4" autocapitalize="characters" autocomplete="off"
+               placeholder="ABCD" value="${typed}"
+               style="text-align:center;font-size:30px;letter-spacing:.3em;padding:14px">
+        ${NET.note?`<p style="font-size:11px;color:#e2887f">${NET.note}</p>`:""}
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="act" id="nBack" style="flex:1">Back</button>
+          <button class="act primary" id="nGo" style="flex:1">Join</button>
+        </div>`
+      : `
+        <p style="color:#8d9480">Two people, one board, over the internet. One of you hosts and reads out a four-character code; the other joins with it. There is no server and nothing to sign up for.</p>
+        ${NET.note?`<p style="font-size:12px;color:#e2887f">${NET.note}</p>`:""}
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:16px">
+          <button class="act primary" id="nHost">Host a game</button>
+          <button class="act" id="nJoin">Join with a code</button>
+          <button class="act" id="nDone">Close</button>
+        </div>
+        <p style="font-size:11px;color:#8d9480;margin-top:12px">The host plays the USA and moves first, the guest plays the Soviets, and the FIA holds the middle. Which end of the island you deploy from — the airfield in the north or the naval base at Saint-Pierre — is tossed for at the start. Both of you need to be online; this is the one part of the game that isn't.</p>`}`;
+
+    const g = function(id){ return o.querySelector("#"+id); };
+    if(g("nHost")) g("nHost").onclick = function(){ NET.note="Setting up…"; draw(); netHost(draw); };
+    if(g("nJoin")) g("nJoin").onclick = function(){ joining=true; NET.note=""; draw(); };
+    if(g("nBack")) g("nBack").onclick = function(){ joining=false; NET.note=""; draw(); };
+    if(g("nCode")) g("nCode").oninput = function(){ typed = g("nCode").value; };
+    if(g("nGo"))   g("nGo").onclick   = function(){ NET.note=""; netJoin(typed || (g("nCode")||{}).value, draw); };
+    if(g("nLeave"))g("nLeave").onclick= function(){ netTeardown("Disconnected."); o.remove(); };
+    if(g("nDone")) g("nDone").onclick = function(){ o.remove(); };
+  };
+  draw();
+}
+
+$("btnLink").onclick = showNet;
 
 /* boot */
 function boot(){
